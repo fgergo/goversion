@@ -85,37 +85,15 @@ func update() {
 	}
 }
 
-func export(ref string) {
-	parent := repoParent()
-
-	// Manually resolve ref to provide better error messages if it is bogus.
-	cmd := exec.Command("git", "rev-parse", ref)
-	cmd.Dir = filepath.Join(parent, "go.mirror")
-	if err := cmd.Run(); err != nil {
-		log.Fatalf("could not resolve %q: %v", ref, err)
-	}
-
-	// Use git archive to generate a zip file at ref.
-	zipfile := filepath.Join(parent, ref+".zip")
-	cmd = exec.Command("git", "archive", "--format", "zip", "-o", zipfile, ref)
-	cmd.Dir = filepath.Join(parent, "go.mirror")
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	// log.Printf("generating zip from Go repo at %s", ref)
-	if err := cmd.Run(); err != nil {
-		log.Fatalf("could not archive Go repo: %v", err)
-	}
-	defer os.Remove(zipfile)
-
-	// Expand the zipfile.
-	r, err := zip.OpenReader(zipfile)
+// unzip file to path
+func unzip(file, path string) {
+	r, err := zip.OpenReader(file)
 	if err != nil {
 		log.Fatal("could not open zip: %v", err)
 	}
 	defer r.Close()
 
-	root := filepath.Join(parent, ref)
+	root := path
 	if err := os.Mkdir(root, 0755); err != nil && !os.IsExist(err) {
 		log.Fatalf("could not mkdir %s: %v", root, err)
 	}
@@ -145,8 +123,53 @@ func export(ref string) {
 		out.Close()
 		rc.Close()
 	}
+}
 
-	vfp := filepath.Join(root, "VERSION")
+// expand() unzips or ungzips+untars or unpkgs?
+func expand(file string) {
+	_, f := filepath.Split(file)
+	path := repoParent()
+
+	if strings.HasSuffix(f, ".zip") {
+		path = filepath.Join(path, strings.TrimSuffix(f, ".zip"))
+		log.Printf("expanding: %s to %s", file, path)
+		unzip(file, path)
+	} else if strings.HasSuffix(file, ".tar.gz") {
+		// untargz(file, path)
+	} else if strings.HasSuffix(file, ".pkg") {
+		// unpkg(file, path)
+	} else {
+		log.Fatalf("unknown file extension: %v", file)
+	}
+}
+
+func export(ref string) {
+	parent := repoParent()
+
+	// Manually resolve ref to provide better error messages if it is bogus.
+	cmd := exec.Command("git", "rev-parse", ref)
+	cmd.Dir = filepath.Join(parent, "go.mirror")
+	if err := cmd.Run(); err != nil {
+		log.Fatalf("could not resolve %q: %v", ref, err)
+	}
+
+	// Use git archive to generate a zip file at ref.
+	zipfile := filepath.Join(parent, ref+".zip")
+	cmd = exec.Command("git", "archive", "--format", "zip", "-o", zipfile, ref)
+	cmd.Dir = filepath.Join(parent, "go.mirror")
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	// log.Printf("generating zip from Go repo at %s", ref)
+	if err := cmd.Run(); err != nil {
+		log.Fatalf("could not archive Go repo: %v", err)
+	}
+	defer os.Remove(zipfile)
+
+	// Expand zip file
+	unzip(zipfile, filepath.Join(parent, ref))
+
+	vfp := filepath.Join(parent, "VERSION")
 	vf, err := os.OpenFile(vfp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		log.Fatalf("could not create VERSION file: %v", err)
@@ -249,7 +272,7 @@ func selectBinary() (string, string, error) {
 }
 
 // download() downloads and saves go binary install package ver
-// from remoteBinary to os.TempDir(), returns file path
+// from remoteBinary to repoParent(), returns file path
 func download() (string, error) {
 	url, file, err := selectBinary()
 	if err != nil {
@@ -271,13 +294,22 @@ func download() (string, error) {
 		return "", err
 	}
 
-	path := os.TempDir()
+	path := repoParent()
 	err = ioutil.WriteFile(filepath.Join(path, file), body, os.ModeAppend)
 	if err != nil {
 		return "", err
 	}
 
 	return filepath.Join(path, file), nil
+}
+
+// isBinaryInstalled() returns true if binary go installation is already available
+func isBinaryInstalled() bool {
+	ref, _ := version(flag.Arg(1))
+	if _, err := os.Stat(filepath.Join(repoParent(), ref+"."+runtime.GOOS+"-"+runtime.GOARCH)); os.IsNotExist(err) {
+		return false
+	}
+	return true
 }
 
 const usage = `goversion is a tool to install and use multiple Go versions.
@@ -336,13 +368,20 @@ func main() {
 		ref := flag.Arg(1)
 		export(ref)
 		return
-	case "download":
+	case "download": // TODO(fgergo): remove, when ready
 		// Intentionally undocumented, useful during testing.
-		path, err := download() // TODO(fgergo): remove, when ready
+		if isBinaryInstalled() {
+			log.Printf("binary already installed")
+			return
+		}
+		path, err := download()
 		if err != nil {
 			log.Fatalf("download error: %s", err)
 		}
 		log.Printf("download ready: %s", path)
+		expand(path)
+		os.Remove(path)
+
 		return
 	case "unpack":
 		// Intentionally undocumented, useful during testing.
